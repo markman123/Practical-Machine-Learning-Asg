@@ -1,0 +1,194 @@
+---
+title: "Practical Machine Learning Assignment"
+author: "Mark Marlow"
+date: "21 August 2015"
+output: html_document
+---
+
+# The task at hand
+
+Courtesy of [http://groupware.les.inf.puc-rio.br/har](groupware), we will use measurements from various parts of the body of 6 subjects to predict what bicep curls technique they were using. These techniques are:
+
+* According to specifications (A)
+* Throwing elbows to the front (B)
+* Lifting to halfway (C)
+* Lowering to halfway (D)
+* Throwing the hips out front (E)
+
+# Data handling
+
+First task is to import the data.
+
+```{r message=FALSE,warning=FALSE}
+require(dplyr)
+require(caret)
+```
+
+```{r}
+training.uri <- 'https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv'
+test.uri <- 'https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv'
+training.file <- 'Data/pml-training.csv'
+test.file <- 'Data/pml-test.csv'
+
+if(!dir.exists('Data')){
+        dir.create('Data')
+}
+
+if(!file.exists(training.file)) {
+        download.file(training.uri,training.file)
+        download.file(test.uri,test.file)
+}
+
+training <- read.csv(training.file
+                     ,stringsAsFactors=FALSE
+                     ,na.strings = c("NA","","#DIV/0!")
+)
+```
+
+Now that we have the data is loaded in, the `classe` column will need to be updated to a factor to allow the `caret` package to properly notice it is for classification. At the same time, we will drop some columns that will not need to be used.
+
+```{r}
+training$classe <- as.factor(training$classe)
+training <- select(training,-c(cvtd_timestamp,X,user_name,raw_timestamp_part_1
+                               ,raw_timestamp_part_2
+                               ,new_window
+                               ,num_window))
+
+```
+
+## Dealing with `NA` values
+
+There are some fields which are aggregations based on rolling periods, so therefore the first few periods are `NA` values. The raw data are good enough, so I exclude all columns which have __any__ `NA` values.
+
+```{r}
+cols.to.keep <- apply(
+                        apply(training,2,is.na)
+                        ,2,sum
+                        )==0
+
+training <- training[,cols.to.keep]
+ncol(training)
+```
+
+We now have clean data, ready to try out some models.
+
+## Split into train/testing
+
+To allow estimations of out of sample, the data will be split into training and test sets. For each of the machine learning techniques, we can then use this 'hold out set' to do an 'out of sample test'.
+
+```{r}
+set.seed(100)
+train.elements <- createDataPartition(training$classe,p=0.7,list=FALSE)
+train.a <- training[train.elements,]
+test.a <- training[-train.elements,]
+print(dim(train.a))
+print(dim(test.a))
+```
+
+# Decision Tree
+
+The first type we will assess is a tree model, which automatically chooses factors to split in a decision tree. Training the model is simple with the `caret` package.
+
+```{r}
+if(!file.exists('treefit.RDS')){
+        tree.fit <- train(classe ~ .,method='rpart',data=train.a)
+        saveRDS(tree.fit,'treefit.RDS')
+} else {
+        tree.fit <- readRDS('treefit.RDS')
+}
+```
+I have wrapped it with saved `RDS` files, so as to not require re-running each time. Now to assess the model.
+
+```{r}
+print(tree.fit)
+```
+
+This shows the best accuracy of ~0.5 - not a great result. Below is a visualisation of the tree.
+
+```{r,message=FALSE,warning=FALSE}
+require(rattle)
+```
+```{r}
+fancyRpartPlot(tree.fit$finalModel)
+```
+
+Seems that the problem with this model is that it's overly simplistic. Let's check on the hold out the results - generally this is expected to be lower than in-training results.
+
+```{r,message=FALSE,warning=FALSE}
+confusionMatrix(predict(tree.fit,test.a),test.a$classe)
+```
+
+It has altogether pruned the `D` node out of it's model. Notwithstanding, still quite a poor result. Let's try another model and hope for a better outcome.
+
+# Random Forest
+
+Training is just as simple, with a slight difference in parameters input to the `train()` method. 
+
+```{r}
+if(!file.exists('forestfit.RDS')){
+        forest.fit <- train(classe ~ ., method='rf',data=train.a)
+        saveRDS(forest.fit,'forestfit.RDS')
+} else {
+        forest.fit <- readRDS('forestfit.RDS')
+}
+```
+
+This took ages (~1 hour) to train this model, as it iterates continuously. Looking at the results.
+
+```{r}
+print(forest.fit)
+```
+
+The best of the models had 98.8%, when mtry is set to 27. Great results! Now let's look at the test set.
+
+```{r,message=FALSE,warning=FALSE}
+confusionMatrix(predict(forest.fit,test.a),test.a$classe)
+```
+
+This shows an even higher accuracy of 99.29% ! No wonder the random forest is so popular. Let's see if a boosting model can improve on this.
+
+# Boosting through `gbm`
+
+There are several boosting models that we could use, we will use `gbm` this time around. Once again, with `caret` this is nice and easy to train our model (although takes a while!)
+
+```{r}
+if(!file.exists('gbmfit.RDS')){
+        gbm.fit <- train(classe ~ .,method='gbm',data=train.a,verbose=FALSE)
+        saveRDS(gbm.fit,'gbmfit.RDS')
+} else {
+        gbm.fit <- readRDS('gbmfit.RDS')
+}
+
+print(gbm.fit)
+```
+
+This shows the best result is with an interaction depth of 3 and 150 trees in the forest, where a result of 95.7%.. not bad, but also not random forest good. Although, let's look at our hold out set results:
+
+```{r,warning=FALSE,message=FALSE}
+confusionMatrix(predict(gbm.fit,test.a),test.a$classe)
+```
+
+This has an accuracy of 95.99%, a good result, but for the ultimate test set, we will use the random forest model.
+
+# Final Evaluation of 20
+
+On the last 20 we will use the random forest model.
+
+```{r}
+testing <- read.csv(test.file
+                     ,stringsAsFactors=FALSE
+                     ,na.strings = c("NA","","#DIV/0!")
+)
+myPredictions <- predict(forest.fit,testing)
+n = length(myPredictions)
+if(!dir.exists('out')){
+        dir.create('out')
+        for(i in 1:n){
+                filename = paste0("out/problem_id_",i,".txt")
+                write.table(as.character(myPredictions[i]),file = filename,quote=FALSE
+                            ,row.names = FALSE, col.names = FALSE)
+        }
+}
+```
+
+These were uploaded to coursera and correctly predicted all 20 correct. All hail the random forest.
